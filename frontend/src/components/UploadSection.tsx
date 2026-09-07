@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Upload, FileText, Satellite, Wind, Waves, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Upload, FileText, Satellite, Wind, Waves, CheckCircle2, AlertCircle, Compass } from 'lucide-react';
 import { EnvironmentalParameters } from '../types';
 import { uploadSatelliteImage, uploadAISCSV } from '../services/api';
 
