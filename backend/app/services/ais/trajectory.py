@@ -9,10 +9,25 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# NOAA MarineCadastre AIS VesselType Code mapping
+MARINECADASTRE_VESSEL_TYPES = {
+    1001: "Fishing",
+    1002: "Tug / Towing",
+    1003: "Cargo / Container",
+    1004: "Tanker / Oil Carrier",
+    1012: "Passenger",
+    1019: "Pleasure Craft",
+    1024: "Sailing",
+    80: "Tanker",
+    70: "Cargo",
+    60: "Passenger",
+    30: "Fishing"
+}
+
 class AISTrajectoryProcessor:
     @staticmethod
     def _find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-        """Fuzzy column resolver using normalized string matching."""
+        """Fuzzy column resolver matching exact or normalized header strings."""
         cols = list(df.columns)
         for cand in candidates:
             for col in cols:
@@ -27,26 +42,40 @@ class AISTrajectoryProcessor:
         return None
 
     @staticmethod
+    def decode_vessel_type(val: Any) -> str:
+        if pd.isnull(val):
+            return "Cargo/Tanker"
+        try:
+            num_code = int(float(val))
+            if num_code in MARINECADASTRE_VESSEL_TYPES:
+                return MARINECADASTRE_VESSEL_TYPES[num_code]
+        except Exception:
+            pass
+        val_str = str(val).strip()
+        return val_str if val_str else "Cargo/Tanker"
+
+    @staticmethod
     def process_csv(
         df: pd.DataFrame, 
         mapping: Optional[AISColumnMapping] = None
     ) -> List[VesselTrajectory]:
         """
-        Ingests AIS CSV dataframe with automatic fuzzy column header resolution,
-        cleans invalid bounds (-90 to 90 lat / -180 to 180 lon), filters GPS spikes (> 50 knots),
-        sorts by vessel MMSI and timestamp, and reconstructs trajectories.
+        Ingests MarineCadastre / NOAA standard AIS CSV datasets automatically,
+        resolves column headers (MMSI, BaseDateTime, LAT, LON, SOG, COG, VesselName, VesselType),
+        cleans coordinates (-90 to 90 lat / -180 to 180 lon), filters GPS spikes,
+        sorts chronologically by MMSI & timestamp, and reconstructs trajectories.
         """
-        mmsi_c = AISTrajectoryProcessor._find_column(df, ["mmsi", "mmsi_num", "vessel_mmsi", "target_mmsi", "id"]) or "mmsi"
-        time_c = AISTrajectoryProcessor._find_column(df, ["timestamp", "basedatetime", "time", "date_time", "datetime", "ts"]) or "timestamp"
-        lat_c = AISTrajectoryProcessor._find_column(df, ["latitude", "lat", "latitude_degrees", "y"]) or "latitude"
-        lon_c = AISTrajectoryProcessor._find_column(df, ["longitude", "lon", "long", "longitude_degrees", "x"]) or "longitude"
+        mmsi_c = AISTrajectoryProcessor._find_column(df, ["mmsi", "mmsi_num", "vessel_mmsi", "target_mmsi", "id"]) or "MMSI"
+        time_c = AISTrajectoryProcessor._find_column(df, ["basedatetime", "timestamp", "time", "date_time", "datetime", "ts"]) or "BaseDateTime"
+        lat_c = AISTrajectoryProcessor._find_column(df, ["lat", "latitude", "latitude_degrees", "y"]) or "LAT"
+        lon_c = AISTrajectoryProcessor._find_column(df, ["lon", "longitude", "long", "longitude_degrees", "x"]) or "LON"
         
         imo_c = AISTrajectoryProcessor._find_column(df, ["imo", "imo_num", "vessel_imo"])
-        name_c = AISTrajectoryProcessor._find_column(df, ["vessel_name", "vesselname", "ship_name", "name"])
+        name_c = AISTrajectoryProcessor._find_column(df, ["vesselname", "vessel_name", "ship_name", "name"])
         sog_c = AISTrajectoryProcessor._find_column(df, ["sog", "speed", "speed_over_ground", "knots"])
         cog_c = AISTrajectoryProcessor._find_column(df, ["cog", "course", "course_over_ground", "heading_deg"])
         head_c = AISTrajectoryProcessor._find_column(df, ["heading", "true_heading", "hdg"])
-        type_c = AISTrajectoryProcessor._find_column(df, ["vessel_type", "vesseltype", "ship_type", "type"])
+        type_c = AISTrajectoryProcessor._find_column(df, ["vesseltype", "vessel_type", "ship_type", "type", "cargo"])
 
         if mapping:
             if mapping.mmsi_col in df.columns: mmsi_c = mapping.mmsi_col
@@ -130,8 +159,14 @@ class AISTrajectoryProcessor:
             if positions:
                 first_row = group.iloc[0]
                 v_name = str(first_row["vessel_name"]) if pd.notnull(first_row["vessel_name"]) else f"Vessel {mmsi}"
-                v_type = str(first_row["vessel_type"]) if pd.notnull(first_row["vessel_type"]) else "Cargo"
-                v_imo = int(first_row["imo"]) if pd.notnull(first_row["imo"]) and pd.to_numeric(first_row["imo"], errors='coerce') > 0 else None
+                v_type = AISTrajectoryProcessor.decode_vessel_type(first_row.get("vessel_type"))
+                
+                raw_imo = first_row.get("imo")
+                v_imo = None
+                if pd.notnull(raw_imo):
+                    imo_digits = re.sub(r'\D', '', str(raw_imo))
+                    if imo_digits and len(imo_digits) >= 7:
+                        v_imo = int(imo_digits[:7])
 
                 trajectories.append(VesselTrajectory(
                     mmsi=int(mmsi),
